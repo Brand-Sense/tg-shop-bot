@@ -1,0 +1,637 @@
+import asyncio, logging, re
+from pathlib import Path
+from dataclasses import dataclass
+from typing import Dict, List, Optional
+from aiogram import Bot, Dispatcher, F
+from aiogram.filters import CommandStart, Command
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, FSInputFile, BotCommand
+from aiogram.utils.keyboard import InlineKeyboardBuilder
+import aiosqlite
+
+logging.basicConfig(level=logging.INFO)
+
+BOT_TOKEN = "8345572872:AAEHvUDH1QGylch9hOYKbmQS5sKUM_vOMjw"
+ADMIN_ID = 5326422897
+
+BASE_DIR = Path(__file__).resolve().parent
+MEDIA_DIR = BASE_DIR / "media"
+LAST_DETAIL_MSG: Dict[int, int] = {}
+
+@dataclass
+class Product:
+    id: str
+    title: str
+    price_cents: int
+    description: str = ""
+
+CATALOG: List[Product] = [
+    Product(id="kz_terea_silver_block",    title="TEREA Silver — блок (Казахстан)",         price_cents=300000),
+    Product(id="kz_terea_summer_block",    title="TEREA Summer wave — блок (Казахстан)",    price_cents=300000),
+    Product(id="kz_terea_sun_block",       title="TEREA Sun pearl — блок (Казахстан)",      price_cents=300000),
+    Product(id="kz_terea_starling_block",  title="TEREA Starling pearl — блок (Казахстан)", price_cents=300000),
+    Product(id="kz_terea_tidal_block",     title="TEREA Tidal pearl — блок (Казахстан)",    price_cents=300000),
+    Product(id="kz_terea_turquoise_block", title="TEREA Turquoise — блок (Казахстан)",      price_cents=300000),
+    Product(id="kz_terea_twilight_block",  title="TEREA Twilight pearl — блок (Казахстан)", price_cents=300000),
+    Product(id="kz_terea_yellow_block",    title="TEREA Yellow — блок (Казахстан)",         price_cents=300000),
+    Product(id="kz_terea_zing_block",      title="TEREA Zing wave — блок (Казахстан)",      price_cents=300000),
+    Product(id="kz_terea_purple_block",    title="TEREA Purple wave — блок (Казахстан)",    price_cents=300000),
+]
+
+KZ_TEREA_IDS = [
+    "kz_terea_silver_block","kz_terea_summer_block","kz_terea_sun_block",
+    "kz_terea_starling_block","kz_terea_tidal_block","kz_terea_turquoise_block",
+    "kz_terea_twilight_block","kz_terea_yellow_block","kz_terea_zing_block",
+    "kz_terea_purple_block",
+]
+
+EMOJI_KZ = {
+    "kz_terea_silver_block": "🍁",
+    "kz_terea_summer_block": "🥭",
+    "kz_terea_sun_block": "🍉",
+    "kz_terea_starling_block": "🍓",
+    "kz_terea_tidal_block": "❄️",
+    "kz_terea_turquoise_block": "🌱",
+    "kz_terea_twilight_block": "🫐",
+    "kz_terea_yellow_block": "🌾",
+    "kz_terea_zing_block": "🍋",
+    "kz_terea_purple_block": "🍇",
+}
+
+DETAILS: Dict[str, Dict[str, str]] = {
+    "kz_terea_silver_block":   {"text": "Сбалансированный табачный вкус, мягкая крепость.", "image": "terea_silver"},
+    "kz_terea_summer_block":   {"text": "Лёгкие фруктовые ноты, оттенки манго.",             "image": "terea_summer_wave"},
+    "kz_terea_sun_block":      {"text": "Свежий арбузный профиль, умеренная сладость.",      "image": "terea_sun_pearl"},
+    "kz_terea_starling_block": {"text": "Ягодный оттенок с нотами клубники.",               "image": "terea_starling_pearl"},
+    "kz_terea_tidal_block":    {"text": "Холодная свежесть, заметный охлаждающий эффект.",   "image": "terea_tidal_pearl"},
+    "kz_terea_turquoise_block":{"text": "Травяная свежесть с нюансами мяты.",                "image": "terea_turquoise"},
+    "kz_terea_twilight_block": {"text": "Лёгкая черничная ягода и холодок.",                 "image": "terea_twilight_pearl"},
+    "kz_terea_yellow_block":   {"text": "Классический лёгкий табак, злаковые ноты.",         "image": "terea_yellow"},
+    "kz_terea_zing_block":     {"text": "Цитрусовая освежающая палитра.",                    "image": "terea_zing_wave"},
+    "kz_terea_purple_block":   {"text": "Освежающие ноты лесных ягод.",                      "image": "terea_purple_wave"},
+}
+
+CREATE_CART_TABLE = """
+CREATE TABLE IF NOT EXISTS cart_items (
+    user_id INTEGER,
+    product_id TEXT,
+    qty INTEGER,
+    PRIMARY KEY (user_id, product_id)
+);
+"""
+CREATE_ORDERS_TABLE = """
+CREATE TABLE IF NOT EXISTS orders (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER,
+    name TEXT,
+    phone TEXT,
+    address TEXT,
+    email TEXT,
+    total_cents INTEGER,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+"""
+CREATE_ORDER_ITEMS = """
+CREATE TABLE IF NOT EXISTS order_items (
+    order_id INTEGER,
+    product_id TEXT,
+    title TEXT,
+    qty INTEGER,
+    price_cents INTEGER
+);
+"""
+
+class Checkout(StatesGroup):
+    name = State()
+    phone = State()
+    address = State()
+
+def money(cents: int) -> str:
+    rub = cents // 100
+    return f"{rub:,} ₽".replace(",", " ")
+
+def _short_title(title: str) -> str:
+    t = title.replace(" (Казахстан)", "")
+    t = t.split(" — ")[0].strip()
+    return t
+
+async def get_db():
+    db = await aiosqlite.connect("shop.db")
+    await db.execute("PRAGMA journal_mode=WAL;")
+    await db.execute(CREATE_CART_TABLE)
+    await db.execute(CREATE_ORDERS_TABLE)
+    await db.execute(CREATE_ORDER_ITEMS)
+    await db.commit()
+    return db
+
+async def get_cart(db, user_id: int) -> Dict[str, int]:
+    cart = {}
+    async with db.execute("SELECT product_id, qty FROM cart_items WHERE user_id=?", (user_id,)) as cur:
+        async for pid, qty in cur:
+            cart[pid] = qty
+    return cart
+
+async def add_to_cart(db, user_id: int, product_id: str, qty: int = 1):
+    await db.execute(
+        "INSERT INTO cart_items(user_id, product_id, qty) VALUES(?,?,?) "
+        "ON CONFLICT(user_id, product_id) DO UPDATE SET qty = qty + ?",
+        (user_id, product_id, qty, qty),
+    )
+    await db.commit()
+
+async def remove_from_cart(db, user_id: int, product_id: str, qty: int = 1):
+    async with db.execute("SELECT qty FROM cart_items WHERE user_id=? AND product_id=?", (user_id, product_id)) as cur:
+        row = await cur.fetchone()
+        if not row:
+            return
+        new_qty = row[0] - qty
+    if new_qty > 0:
+        await db.execute("UPDATE cart_items SET qty=? WHERE user_id=? AND product_id=?", (new_qty, user_id, product_id))
+    else:
+        await db.execute("DELETE FROM cart_items WHERE user_id=? AND product_id=?", (user_id, product_id))
+    await db.commit()
+
+async def clear_cart(db, user_id: int):
+    await db.execute("DELETE FROM cart_items WHERE user_id=?", (user_id,))
+    await db.commit()
+
+def resolve_media(name: Optional[str]):
+    if not name:
+        return None
+    p = MEDIA_DIR / name
+    if p.exists():
+        return p
+    stem = Path(name).stem
+    for ext in (".png", ".jpg", ".jpeg", ".PNG", ".JPG", ".JPEG"):
+        cand = MEDIA_DIR / f"{stem}{ext}"
+        if cand.exists():
+            return cand
+    norm = re.sub(r"[^a-z0-9]", "", stem.lower())
+    for f in MEDIA_DIR.glob("*"):
+        if f.is_file():
+            fn = re.sub(r"[^a-z0-9]", "", f.stem.lower())
+            if fn == norm or norm in fn:
+                return f
+    return None
+
+def sticks_root_kb() -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="🇰🇿 TEREA Казахстан", callback_data="cat:kz")
+    kb.button(text="🇮🇩 TEREA Индонезия", callback_data="cat:tz_id")
+    kb.button(text="🇯🇵 TEREA Япония", callback_data="cat:tz_jp")
+    kb.button(text="🇮🇩 FONDZ Индонезия", callback_data="cat:fondz_id")
+    kb.button(text="🇮🇩 MOFEE Индонезия", callback_data="cat:mofee_id")
+    kb.button(text="Назад", callback_data="cats")
+    kb.adjust(1)
+    return kb.as_markup()
+
+def categories_kb() -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="🏠 Главное меню", callback_data="start_menu")
+    kb.button(text="📦 Стики", callback_data="sticks_menu")
+    kb.button(text="💨 Устройства", callback_data="dev:root")
+    kb.button(text="🆘 Поддержка", url="https://t.me/ambasser")
+    kb.adjust(1)
+    return kb.as_markup()
+
+def detail_kb(pid: str, back_cb: str) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="Добавить в корзину", callback_data=f"add:{pid}")
+    kb.button(text="Назад", callback_data=back_cb)
+    kb.adjust(1)
+    return kb.as_markup()
+
+def qty_kb(pid: str, back_cb: str) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    for n in range(1, 10):
+        kb.button(text=str(n), callback_data=f"qty:{pid}:{n}")
+    kb.button(text="Назад", callback_data=back_cb)
+    kb.adjust(5, 4, 1)
+    return kb.as_markup()
+
+def category_kb(cat: str) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    ids = KZ_TEREA_IDS if cat == "kz" else []
+    for pid in ids:
+        p = next((x for x in CATALOG if x.id == pid), None)
+        if not p:
+            continue
+        emoji = (EMOJI_KZ.get(pid, "") + " ")
+        kb.button(text=f"{emoji}{_short_title(p.title)} ({money(p.price_cents)})", callback_data=f"pd:{p.id}")
+    kb.button(text="Назад", callback_data=("sticks_menu" if cat == "kz" else "cats"))
+    kb.adjust(1)
+    return kb.as_markup()
+
+bot = Bot(BOT_TOKEN)
+dp = Dispatcher()
+
+@dp.message(CommandStart())
+async def start(m: Message):
+    cover = resolve_media("cover")
+    kb = InlineKeyboardBuilder()
+    kb.button(text="Главное меню", callback_data="start_menu")
+    kb.adjust(1)
+    if cover and cover.exists():
+        await m.answer_photo(photo=FSInputFile(str(cover)), reply_markup=kb.as_markup())
+    else:
+        await m.answer("Добро пожаловать!", reply_markup=kb.as_markup())
+
+@dp.callback_query(F.data == "start_menu")
+async def start_menu(c: CallbackQuery):
+    await c.message.answer("Выберите раздел:", reply_markup=categories_kb())
+    await c.answer()
+
+@dp.message(Command("sticks"))
+async def sticks_cmd(m: Message):
+    await m.answer("Выберите источник стиков:", reply_markup=sticks_root_kb())
+
+@dp.message(Command("devices"))
+async def devices_cmd(m: Message):
+    await devices_root_from_message(m)
+
+@dp.callback_query(F.data == "sticks_menu")
+async def sticks_menu(c: CallbackQuery):
+    try:
+        await c.message.edit_text("Выберите источник стиков:", reply_markup=sticks_root_kb())
+    except Exception:
+        await c.message.answer("Выберите источник стиков:", reply_markup=sticks_root_kb())
+    await c.answer()
+
+@dp.callback_query(F.data == "cats")
+async def cats(c: CallbackQuery):
+    try:
+        await c.message.edit_text("Разделы:", reply_markup=categories_kb())
+    except Exception:
+        await c.message.answer("Разделы:", reply_markup=categories_kb())
+    await c.answer()
+
+@dp.callback_query(F.data == "explore_flavors")
+async def explore_flavors(c: CallbackQuery):
+    photo = resolve_media("tastes")
+    kb = InlineKeyboardBuilder()
+    kb.button(text="Назад", callback_data="cats")
+    kb.adjust(1)
+    if photo and photo.exists():
+        await c.message.answer_photo(FSInputFile(str(photo)), caption="Ознакомьтесь с ассортиментом TEREA:", reply_markup=kb.as_markup())
+    else:
+        try:
+            await c.message.edit_text("Ознакомьтесь с ассортиментом TEREA.", reply_markup=kb.as_markup())
+        except Exception:
+            await c.message.answer("Ознакомьтесь с ассортиментом TEREA.", reply_markup=kb.as_markup())
+    await c.answer()
+
+@dp.callback_query(F.data == "dev:root")
+async def devices_root(c: CallbackQuery):
+    await send_devices_root(c)
+    await c.answer()
+
+async def devices_root_from_message(m: Message):
+    pic = resolve_media("devices_cover")
+    if pic and pic.exists():
+        await m.answer_photo(FSInputFile(str(pic)), caption="Устройства IQOS ILUMA", reply_markup=devices_root_kb())
+    else:
+        await m.answer("Устройства IQOS ILUMA", reply_markup=devices_root_kb())
+
+async def send_devices_root(c: CallbackQuery):
+    pic = resolve_media("devices_cover")
+    if pic and pic.exists():
+        await c.message.answer_photo(FSInputFile(str(pic)), caption="Устройства IQOS ILUMA", reply_markup=devices_root_kb())
+    else:
+        try:
+            await c.message.edit_text("Устройства IQOS ILUMA", reply_markup=devices_root_kb())
+        except Exception:
+            await c.message.answer("Устройства IQOS ILUMA", reply_markup=devices_root_kb())
+
+def devices_root_kb() -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="💎 IQOS ILUMA I PRIME", callback_data="dev:root->prime")
+    kb.button(text="✨ IQOS ILUMA I", callback_data="dev:root->i")
+    kb.button(text="🔹 IQOS ILUMA I ONE", callback_data="dev:root->one")
+    kb.button(text="Назад", callback_data="cats")
+    kb.adjust(1)
+    return kb.as_markup()
+
+def model_kb(key: str) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    for slug, title in DEV_MODEL_COLOR_LIST[key]:
+        kb.button(text=title, callback_data=f"devc:{key}:{slug}")
+    kb.button(text="Назад", callback_data="dev:root")
+    kb.adjust(1)
+    return kb.as_markup()
+
+@dp.callback_query(F.data.startswith("dev:root->"))
+async def open_model_from_root(c: CallbackQuery):
+    key = c.data.split("->", 1)[1]
+    title = DEV_MODEL_TITLE[key]
+    cover = resolve_media(DEV_MODEL_COVER[key])
+    if cover and cover.exists():
+        await c.message.answer_photo(FSInputFile(str(cover)), caption=title, reply_markup=model_kb(key))
+    else:
+        try:
+            await c.message.edit_text(title, reply_markup=model_kb(key))
+        except Exception:
+            await c.message.answer(title, reply_markup=model_kb(key))
+    await c.answer()
+
+@dp.callback_query(F.data.startswith("devc:"))
+async def open_color(c: CallbackQuery):
+    _, key, slug = c.data.split(":")
+    title_model = DEV_MODEL_TITLE[key]
+    price = DEVICES_PRICES[key]
+    colors = dict(DEV_MODEL_COLOR_LIST[key])
+    color_title = colors.get(slug, "")
+    img = resolve_media(f"iluma_{key}_{slug}")
+    caption = f"{DEV_MODEL_DESC[key]}\nЦвет: {color_title}\nЦена: {money(price)}"
+    pid = f"dev_{key}_{slug}"
+    kb = InlineKeyboardBuilder()
+    kb.button(text="Добавить в корзину", callback_data=f"add:{pid}")
+    kb.button(text="Назад", callback_data=f"dev:root->{key}")
+    kb.adjust(1)
+    if img and img.exists():
+        await c.message.answer_photo(FSInputFile(str(img)), caption=caption, reply_markup=kb.as_markup())
+    else:
+        try:
+            await c.message.edit_text(f"{title_model}\n\n{caption}", reply_markup=kb.as_markup())
+        except Exception:
+            await c.message.answer(f"{title_model}\n\n{caption}", reply_markup=kb.as_markup())
+    await c.answer()
+
+@dp.callback_query(F.data.startswith("cat:"))
+async def open_category(c: CallbackQuery):
+    key = c.data.split(":",1)[1]
+    if key == "kz":
+        title = "Стики TEREA Казахстан"
+        kb = category_kb("kz")
+        try:
+            await c.message.edit_text(f"{title} — выберите товар:", reply_markup=kb)
+        except Exception:
+            await c.message.answer(f"{title} — выберите товар:", reply_markup=kb)
+    else:
+        msg = ("Ассортимент пока обновляется.\n"
+               "Если хотите купить именно эти стики или те, что не представлены в каталоге, "
+               "свяжитесь, пожалуйста, с менеджером: @ambasser")
+        kb = InlineKeyboardBuilder()
+        kb.button(text="Назад", callback_data="sticks_menu")
+        kb.adjust(1)
+        try:
+            await c.message.edit_text(msg, reply_markup=kb.as_markup())
+        except Exception:
+            await c.message.answer(msg, reply_markup=kb.as_markup())
+    await c.answer()
+
+@dp.callback_query(F.data.startswith("pd:"))
+async def product_detail(c: CallbackQuery):
+    pid = c.data.split(":",1)[1]
+    prod = next((p for p in CATALOG if p.id == pid), None)
+    if not prod:
+        await c.answer("Товар не найден")
+        return
+    info = DETAILS.get(pid, {})
+    raw_text = info.get("text", "").strip()
+    desc = raw_text
+    for s in ("1 блок = 10 пачек", "1 блок=10 пачек", "1 блок - 10 пачек"):
+        desc = desc.replace(s, "").strip()
+    pack_line = "1 блок = 10 пачек"
+    body = f"{desc}\n{pack_line}" if desc else f"Описание появится позже\n{pack_line}"
+    caption = f"{_short_title(prod.title)}\n\n{body}\n\nЦена: {money(prod.price_cents)}"
+    img_key = info.get("image", "").strip()
+    media_path = resolve_media(img_key)
+    LAST_DETAIL_MSG[c.from_user.id] = c.message.message_id
+    if media_path and media_path.exists():
+        await c.message.answer_photo(photo=FSInputFile(str(media_path)), caption=caption, reply_markup=detail_kb(pid, back_cb="cat:kz"))
+    else:
+        await c.message.answer(caption, reply_markup=detail_kb(pid, back_cb="cat:kz"))
+    await c.answer()
+
+@dp.callback_query(F.data.startswith("add:"))
+async def on_add(c: CallbackQuery):
+    pid = c.data.split(":", 1)[1]
+    if pid.startswith("dev_"):
+        db = await get_db()
+        await add_to_cart(db, c.from_user.id, pid, 1)
+        try:
+            await bot.edit_message_reply_markup(chat_id=c.message.chat.id, message_id=c.message.message_id, reply_markup=None)
+        except Exception:
+            pass
+        mid = LAST_DETAIL_MSG.get(c.from_user.id)
+        if mid:
+            try:
+                await bot.edit_message_reply_markup(chat_id=c.message.chat.id, message_id=mid, reply_markup=None)
+            except Exception:
+                pass
+        kb = InlineKeyboardBuilder()
+        kb.button(text="🛒 Корзина", callback_data="cart")
+        kb.button(text="Выбрать стики", callback_data="cat:kz")
+        kb.adjust(2)
+        await c.message.answer("Товар добавлен в корзину", reply_markup=kb.as_markup())
+        await c.answer("Добавлено")
+        return
+    LAST_DETAIL_MSG[c.from_user.id] = c.message.message_id
+    back_cb = "cat:kz"
+    await c.message.answer("Сколько блоков добавить в корзину?", reply_markup=qty_kb(pid, back_cb=back_cb))
+    await c.answer()
+
+@dp.callback_query(F.data.startswith("qty:"))
+async def on_choose_qty(c: CallbackQuery):
+    _, pid, n = c.data.split(":", 2)
+    qty = int(n)
+    db = await get_db()
+    await add_to_cart(db, c.from_user.id, pid, qty)
+    try:
+        await bot.edit_message_reply_markup(chat_id=c.message.chat.id, message_id=c.message.message_id, reply_markup=None)
+    except Exception:
+        pass
+    mid = LAST_DETAIL_MSG.get(c.from_user.id)
+    if mid:
+        try:
+            await bot.edit_message_reply_markup(chat_id=c.message.chat.id, message_id=mid, reply_markup=None)
+        except Exception:
+            pass
+    await c.answer("Добавлено")
+    await c.message.answer("Товар добавлен в корзину")
+    kb = InlineKeyboardBuilder()
+    kb.button(text="🛒 Корзина", callback_data="cart")
+    kb.button(text="Назад", callback_data="cat:kz")
+    kb.adjust(2)
+    await c.message.answer("Продолжите покупки или перейдите в корзину", reply_markup=kb.as_markup())
+
+def cart_kb(cart: Dict[str, int]) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    for pid, qty in cart.items():
+        prod = next((p for p in CATALOG if p.id == pid), None)
+        if not prod:
+            continue
+        kb.row(InlineKeyboardButton(text=f"{_short_title(prod.title)} ({qty})", callback_data="noop"))
+        kb.row(
+            InlineKeyboardButton(text="➖", callback_data=f"rem:{pid}"),
+            InlineKeyboardButton(text="➕", callback_data=f"inc:{pid}")
+        )
+    kb.row(InlineKeyboardButton(text="✅ Оформить заказ", callback_data="checkout"))
+    kb.row(InlineKeyboardButton(text="🧹 Очистить", callback_data="clear"))
+    kb.row(InlineKeyboardButton(text="Назад", callback_data="cats"))
+    return kb.as_markup()
+
+@dp.callback_query(F.data == "cart")
+async def on_cart(c: CallbackQuery):
+    db = await get_db()
+    cart = await get_cart(db, c.from_user.id)
+    if not cart:
+        try:
+            await c.message.edit_text("🛒 Корзина пуста.", reply_markup=categories_kb())
+        except Exception:
+            await c.message.answer("🛒 Корзина пуста.", reply_markup=categories_kb())
+        await c.answer()
+        return
+    lines, total = ["🛒 Корзина:"], 0
+    for pid, qty in cart.items():
+        prod = next((p for p in CATALOG if p.id == pid), None)
+        if not prod:
+            continue
+        line_sum = prod.price_cents * qty
+        total += line_sum
+        lines.append(f"• {_short_title(prod.title)} × {qty} = {money(line_sum)}")
+    lines.append(f"\nИтого: {money(total)}")
+    try:
+        await c.message.edit_text("\n".join(lines), reply_markup=cart_kb(cart))
+    except Exception:
+        await c.message.answer("\n".join(lines), reply_markup=cart_kb(cart))
+    await c.answer()
+
+@dp.callback_query(F.data.startswith("inc:"))
+async def on_inc(c: CallbackQuery):
+    pid = c.data.split(":", 1)[1]
+    db = await get_db()
+    await add_to_cart(db, c.from_user.id, pid, 1)
+    await on_cart(c)
+
+@dp.callback_query(F.data.startswith("rem:"))
+async def on_rem(c: CallbackQuery):
+    pid = c.data.split(":", 1)[1]
+    db = await get_db()
+    await remove_from_cart(db, c.from_user.id, pid, 1)
+    await on_cart(c)
+
+@dp.callback_query(F.data == "clear")
+async def on_clear(c: CallbackQuery):
+    db = await get_db()
+    await clear_cart(db, c.from_user.id)
+    try:
+        await c.message.edit_text("🛒 Корзина очищена.", reply_markup=categories_kb())
+    except Exception:
+        await c.message.answer("🛒 Корзина очищена.", reply_markup=categories_kb())
+    await c.answer()
+
+class Checkout(StatesGroup):
+    name = State()
+    phone = State()
+    address = State()
+
+@dp.callback_query(F.data == "checkout")
+async def on_checkout(c: CallbackQuery, state: FSMContext):
+    await state.set_state(Checkout.name)
+    try:
+        await c.message.edit_text("Введите ваше имя:")
+    except Exception:
+        await c.message.answer("Введите ваше имя:")
+    await c.answer()
+
+@dp.message(Checkout.name)
+async def ask_phone(m: Message, state: FSMContext):
+    await state.update_data(name=m.text.strip())
+    await state.set_state(Checkout.phone)
+    await m.answer("Телефон для связи:")
+
+@dp.message(Checkout.phone)
+async def ask_address(m: Message, state: FSMContext):
+    await state.update_data(phone=m.text.strip())
+    await state.set_state(Checkout.address)
+    await m.answer("Адрес доставки:")
+
+@dp.message(Checkout.address)
+async def finalize_order(m: Message, state: FSMContext):
+    db = await get_db()
+    address = m.text.strip()
+    await state.update_data(address=address)
+    data = await state.get_data()
+    cart = await get_cart(db, m.from_user.id)
+    if not cart:
+        await state.clear()
+        await m.answer("Корзина пуста.")
+        return
+    total, items_for_msg = 0, []
+    for pid, qty in cart.items():
+        prod = next((p for p in CATALOG if p.id == pid), None)
+        if not prod:
+            continue
+        line_sum = prod.price_cents * qty
+        total += line_sum
+        items_for_msg.append(f"• {_short_title(prod.title)} × {qty} = {money(line_sum)}")
+    async with db.execute(
+        "INSERT INTO orders(user_id, name, phone, address, email, total_cents) VALUES (?,?,?,?,?,?)",
+        (m.from_user.id, data.get("name"), data.get("phone"), data.get("address"), "", total),
+    ) as cur:
+        await db.commit()
+        order_id = cur.lastrowid
+    for pid, qty in cart.items():
+        prod = next((p for p in CATALOG if p.id == pid), None)
+        if not prod:
+            continue
+        await db.execute(
+            "INSERT INTO order_items(order_id, product_id, title, qty, price_cents) VALUES (?,?,?,?,?)",
+            (order_id, prod.id, prod.title, qty, prod.price_cents),
+        )
+    await db.commit()
+    await clear_cart(db, m.from_user.id)
+    admin_text = (
+        f"🆕 Заказ #{order_id}\n"
+        f"Имя: {data.get('name')}\nТелефон: {data.get('phone')}\nАдрес: {data.get('address')}\n\n"
+        + "\n".join(items_for_msg)
+        + f"\n\nИтого: {money(total)}\nПрофиль: @{m.from_user.username or m.from_user.id}"
+    )
+    if ADMIN_ID:
+        try:
+            await Bot(BOT_TOKEN).send_message(ADMIN_ID, admin_text)
+        except Exception:
+            pass
+    user_text = (
+        "Спасибо! Заказ принят.\n\n"
+        + "\n".join(items_for_msg)
+        + f"\n\nИтого: {money(total)}\n\n"
+        "В ближайшее время с Вами свяжется наш менеджер."
+    )
+    await m.answer(user_text)
+    await state.clear()
+
+DEVICES_PRICES = {"prime": 1500000, "i": 1000000, "one": 650000}
+PRIME_COLORS = [("evening_ruby","Вечерний рубин"),("black_graphite","Черный графит"),("azure_breeze","Лазурный бриз"),("sea_wave","Морская волна")]
+I_COLORS     = [("black_graphite","Черный графит"),("azure_breeze","Лазурный бриз"),("lilac_duet","Лиловый дуэт"),("green_oasis","Зеленый оазис"),("terracotta_fantasy","Терракотовая фантазия")]
+ONE_COLORS   = [("green_oasis","Зеленый оазис"),("azure_breeze","Лазурный бриз"),("lilac_duet","Лиловый дуэт"),("terracotta_fantasy","Терракотовая фантазия"),("black_graphite","Черный графит")]
+DEV_MODEL_TITLE = {"prime":"IQOS ILUMA I PRIME","i":"IQOS ILUMA I","one":"IQOS ILUMA I ONE"}
+DEV_MODEL_COVER = {"prime":"iluma_prime_cover","i":"iluma_i_cover","one":"iluma_one_cover"}
+DEV_MODEL_DESC  = {"prime":"IQOS ILUMA I PRIME - Наше самое совершенное устройство","i":"IQOS ILUMA I - Наше самое совершенное устройство","one":"IQOS ILUMA I ONE - Наше самое совершенное устройство"}
+DEV_MODEL_COLOR_LIST = {"prime":PRIME_COLORS,"i":I_COLORS,"one":ONE_COLORS}
+
+for key, colors in DEV_MODEL_COLOR_LIST.items():
+    for slug, title in colors:
+        pid = f"dev_{key}_{slug}"
+        price = DEVICES_PRICES[key]
+        prod_title = f"{DEV_MODEL_TITLE[key]} — {title}"
+        if not any(p.id == pid for p in CATALOG):
+            CATALOG.append(Product(id=pid, title=prod_title, price_cents=price))
+
+async def set_commands():
+    cmds = [
+        BotCommand(command="start",   description="🏠 Главное меню"),
+        BotCommand(command="sticks",  description="📦 Стики"),
+        BotCommand(command="devices", description="💨 Устройства"),
+    ]
+    await bot.set_my_commands(cmds)
+
+async def main():
+    await set_commands()
+    db = await get_db(); await db.close()
+    await dp.start_polling(bot)
+
+if __name__ == "__main__":
+    asyncio.run(main())

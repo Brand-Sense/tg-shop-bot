@@ -1,0 +1,5 @@
+aiogram==3.22.0
+aiosqlite==0.21.0
+aiofiles==24.1.0
+magic-filter==1.0.12
+typing_extensions==4.15.0
