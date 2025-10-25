@@ -12,11 +12,11 @@ import aiosqlite
 
 logging.basicConfig(level=logging.INFO)
 
-BOT_TOKEN = os.getenv("BOT_TOKEN") or "8345572872:AAFvtq0omg97u_-yBFEmJ6X5PBhBC8vHMMA"
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
-    logging.error("ENV BOT_TOKEN = MISSING")
-else:
-    logging.info("ENV BOT_TOKEN loaded, len=%s", len(BOT_TOKEN))
+    raise RuntimeError("ENV BOT_TOKEN is required")
+
+bot = Bot(BOT_TOKEN)
 ADMIN_ID = int(os.getenv("ADMIN_ID", "5326422897"))
 
 BASE_DIR = Path(__file__).resolve().parent
