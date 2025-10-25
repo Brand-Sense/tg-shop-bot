@@ -12,7 +12,7 @@ import aiosqlite
 
 logging.basicConfig(level=logging.INFO)
 
-BOT_TOKEN = os.getenv("BOT_TOKEN", "8345572872:AAEHvUDH1QGylch9hOYKbmQS5sKUM_vOMjw")
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "5326422897"))
 
 BASE_DIR = Path(__file__).resolve().parent
