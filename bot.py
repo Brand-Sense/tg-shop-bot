@@ -1,4 +1,4 @@
-import asyncio, logging, re, os, os
+import asyncio, logging, re, os
 from pathlib import Path
 from dataclasses import dataclass
 from typing import Dict, List, Optional
@@ -13,6 +13,10 @@ import aiosqlite
 logging.basicConfig(level=logging.INFO)
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
+if not BOT_TOKEN:
+    logging.error("ENV BOT_TOKEN = MISSING")
+else:
+    logging.info("ENV BOT_TOKEN loaded, len=%s", len(BOT_TOKEN))
 ADMIN_ID = int(os.getenv("ADMIN_ID", "5326422897"))
 
 BASE_DIR = Path(__file__).resolve().parent
