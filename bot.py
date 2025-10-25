@@ -12,7 +12,7 @@ import aiosqlite
 
 logging.basicConfig(level=logging.INFO)
 
-BOT_TOKEN = os.getenv("BOT_TOKEN")
+BOT_TOKEN = os.getenv("BOT_TOKEN") or "8345572872:AAFvtq0omg97u_-yBFEmJ6X5PBhBC8vHMMA"
 if not BOT_TOKEN:
     logging.error("ENV BOT_TOKEN = MISSING")
 else:
