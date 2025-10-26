@@ -561,6 +561,81 @@ async def on_clear(c: CallbackQuery):
         await c.message.answer("🛒 Корзина очищена.", reply_markup=categories_kb())
     await c.answer()
 
+@dp.callback_query(F.data == "checkout")
+async def on_checkout(c: CallbackQuery, state: FSMContext):
+    db = await get_db()
+    cart = await get_cart(db, c.from_user.id)
+    if not cart:
+        await c.answer("Корзина пуста", show_alert=True)
+        return
+    await state.set_state(Checkout.name)
+    await c.message.answer("Введите имя")
+    await c.answer()
+
+@dp.message(Checkout.name)
+async def checkout_name(m: Message, state: FSMContext):
+    await state.update_data(name=m.text.strip())
+    await state.set_state(Checkout.phone)
+    await m.answer("Телефон (например: +7 999 123-45-67)")
+
+@dp.message(Checkout.phone)
+async def checkout_phone(m: Message, state: FSMContext):
+    phone = re.sub(r"[^\d+]", "", m.text or "")
+    if len(re.sub(r"\D", "", phone)) < 10:
+        await m.answer("Телефон некорректен, повторите")
+        return
+    await state.update_data(phone=phone)
+    await state.set_state(Checkout.address)
+    await m.answer("Адрес доставки")
+
+@dp.message(Checkout.address)
+async def checkout_address(m: Message, state: FSMContext):
+    await state.update_data(address=m.text.strip())
+    data = await state.get_data()
+    db = await get_db()
+    cart = await get_cart(db, m.from_user.id)
+    if not cart:
+        await m.answer("Корзина пуста")
+        await state.clear()
+        return
+    total = 0
+    for pid, qty in cart.items():
+        prod = next((p for p in CATALOG if p.id == pid), None)
+        if not prod:
+            continue
+        total += prod.price_cents * qty
+    await db.execute(
+        "INSERT INTO orders(user_id, name, phone, address, email, total_cents) VALUES(?,?,?,?,?,?)",
+        (m.from_user.id, data.get("name",""), data.get("phone",""), data.get("address",""), "", total),
+    )
+    await db.commit()
+    async with db.execute("SELECT last_insert_rowid()") as cur:
+        row = await cur.fetchone()
+        order_id = int(row[0])
+    for pid, qty in cart.items():
+        prod = next((p for p in CATALOG if p.id == pid), None)
+        if not prod:
+            continue
+        await db.execute(
+            "INSERT INTO order_items(order_id, product_id, title, qty, price_cents) VALUES(?,?,?,?,?)",
+            (order_id, pid, prod.title, qty, prod.price_cents),
+        )
+    await db.commit()
+    await clear_cart(db, m.from_user.id)
+    await state.clear()
+    lines = [f"Заказ №{order_id} оформлен", "", "Состав:"]
+    sum_cents = 0
+    async with db.execute("SELECT title, qty, price_cents FROM order_items WHERE order_id=?", (order_id,)) as cur:
+        async for title, qty, price_cents in cur:
+            line_sum = price_cents * qty
+            sum_cents += line_sum
+            lines.append(f"• {_short_title(title)} × {qty} = {money(line_sum)}")
+    lines.append(f"\nИтого: {money(sum_cents)}")
+    lines.append(f"\nПолучатель: {data.get('name')}")
+    lines.append(f"Телефон: {data.get('phone')}")
+    lines.append(f"Адрес: {data.get('address')}")
+    await m.answer("\n".join(lines), reply_markup=categories_kb())
+    
 # Add device products to catalog so they show in cart with names/prices
 for key, colors in {"prime":PRIME_COLORS, "i":I_COLORS, "one":ONE_COLORS}.items():
     for slug, title in colors:
