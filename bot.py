@@ -9,31 +9,27 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, FSInputFile, BotCommand
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 import aiosqlite
-
-logging.basicConfig(level=logging.INFO)
 import os
 import logging
-from dotenv import load_dotenv  # <- добавили
 
 logging.basicConfig(level=logging.INFO)
 
-# Загружаем .env только в локалке; на Railway НИЧЕГО не перезаписываем
 if os.getenv("ENV", "prod") != "prod":
-    load_dotenv(override=False)
+    try:
+        from dotenv import load_dotenv
+        load_dotenv(override=False)
+    except ImportError:
+        pass
 
 def _env(name: str, default: str | None = None, required: bool = False) -> str:
     val = os.getenv(name, default)
     val = (val or "").strip()
     if required and not val:
-        raise RuntimeError(f"ENV {name} is required")
+        raise RuntimeError(f"{name} required")
     return val
 
 BOT_TOKEN = _env("BOT_TOKEN", required=True)
 ADMIN_ID = int(_env("ADMIN_ID", "5326422897"))
-
-# (опциональная диагностика на время дебага; можно удалить после первого успешного старта)
-print("[ENV] has BOT_TOKEN?", bool(os.getenv("BOT_TOKEN")))
-print("[ENV] keys:", [k for k in os.environ.keys() if "BOT" in k or "TOKEN" in k])
 
 bot = Bot(BOT_TOKEN)
 BASE_DIR = Path(__file__).resolve().parent
@@ -46,7 +42,7 @@ class Product:
     title: str
     price_cents: int
     description: str = ""
-
+    
 CATALOG: List[Product] = [
     Product(id="kz_terea_silver_block",    title="TEREA Silver — блок (Казахстан)",         price_cents=300000),
     Product(id="kz_terea_summer_block",    title="TEREA Summer wave — блок (Казахстан)",    price_cents=300000),
