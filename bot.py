@@ -598,20 +598,24 @@ async def checkout_address(m: Message, state: FSMContext):
         await m.answer("Корзина пуста")
         await state.clear()
         return
+
     total = 0
     for pid, qty in cart.items():
         prod = next((p for p in CATALOG if p.id == pid), None)
         if not prod:
             continue
         total += prod.price_cents * qty
+
     await db.execute(
         "INSERT INTO orders(user_id, name, phone, address, email, total_cents) VALUES(?,?,?,?,?,?)",
         (m.from_user.id, data.get("name",""), data.get("phone",""), data.get("address",""), "", total),
     )
     await db.commit()
+
     async with db.execute("SELECT last_insert_rowid()") as cur:
         row = await cur.fetchone()
         order_id = int(row[0])
+
     for pid, qty in cart.items():
         prod = next((p for p in CATALOG if p.id == pid), None)
         if not prod:
@@ -621,8 +625,7 @@ async def checkout_address(m: Message, state: FSMContext):
             (order_id, pid, prod.title, qty, prod.price_cents),
         )
     await db.commit()
-    await clear_cart(db, m.from_user.id)
-    await state.clear()
+
     lines = [f"Заказ №{order_id} оформлен", "", "Состав:"]
     sum_cents = 0
     async with db.execute("SELECT title, qty, price_cents FROM order_items WHERE order_id=?", (order_id,)) as cur:
@@ -634,6 +637,29 @@ async def checkout_address(m: Message, state: FSMContext):
     lines.append(f"\nПолучатель: {data.get('name')}")
     lines.append(f"Телефон: {data.get('phone')}")
     lines.append(f"Адрес: {data.get('address')}")
+
+    user_link = f"tg://user?id={m.from_user.id}"
+    admin_lines = [
+        f"🆕 Новый заказ №{order_id}",
+        f"Покупатель: {data.get('name')} (id: {m.from_user.id})",
+        f"Профиль: {user_link}",
+        f"Телефон: {data.get('phone')}",
+        f"Адрес: {data.get('address')}",
+        "",
+        "Состав:"
+    ]
+    async with db.execute("SELECT title, qty, price_cents FROM order_items WHERE order_id=?", (order_id,)) as cur:
+        async for title, qty, price_cents in cur:
+            admin_lines.append(f"• {_short_title(title)} × {qty} = {money(price_cents*qty)}")
+    admin_lines.append(f"\nИтого: {money(sum_cents)}")
+
+    try:
+        await bot.send_message(chat_id=ADMIN_ID, text="\n".join(admin_lines))
+    except Exception:
+        pass
+
+    await clear_cart(db, m.from_user.id)
+    await state.clear()
     await m.answer("\n".join(lines), reply_markup=categories_kb())
     
 # Add device products to catalog so they show in cart with names/prices
