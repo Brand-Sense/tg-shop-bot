@@ -11,14 +11,31 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 import aiosqlite
 
 logging.basicConfig(level=logging.INFO)
+import os
+import logging
+from dotenv import load_dotenv  # <- добавили
 
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-if not BOT_TOKEN:
-    raise RuntimeError("ENV BOT_TOKEN is required")
+logging.basicConfig(level=logging.INFO)
+
+# Загружаем .env только в локалке; на Railway НИЧЕГО не перезаписываем
+if os.getenv("ENV", "prod") != "prod":
+    load_dotenv(override=False)
+
+def _env(name: str, default: str | None = None, required: bool = False) -> str:
+    val = os.getenv(name, default)
+    val = (val or "").strip()
+    if required and not val:
+        raise RuntimeError(f"ENV {name} is required")
+    return val
+
+BOT_TOKEN = _env("BOT_TOKEN", required=True)
+ADMIN_ID = int(_env("ADMIN_ID", "5326422897"))
+
+# (опциональная диагностика на время дебага; можно удалить после первого успешного старта)
+print("[ENV] has BOT_TOKEN?", bool(os.getenv("BOT_TOKEN")))
+print("[ENV] keys:", [k for k in os.environ.keys() if "BOT" in k or "TOKEN" in k])
 
 bot = Bot(BOT_TOKEN)
-ADMIN_ID = int(os.getenv("ADMIN_ID", "5326422897"))
-
 BASE_DIR = Path(__file__).resolve().parent
 MEDIA_DIR = BASE_DIR / "media"
 LAST_DETAIL_MSG: Dict[int, int] = {}
